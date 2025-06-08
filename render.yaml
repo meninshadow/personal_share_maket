@@ -1,0 +1,7 @@
+services:
+  - type: cron
+    name: banknifty-tracker
+    schedule: "*/15 * * * *"  # Every 15 minutes
+    env: python
+    buildCommand: ""
+    startCommand: "python banknifty_tracker.py"
