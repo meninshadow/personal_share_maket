@@ -7,76 +7,58 @@ import os
 
 # === CONFIGURATION ===
 BOT_TOKEN = os.getenv("telgram_bot_token")
-
 CHAT_ID = os.getenv('telgram_bot_chat_id')
-
-API_KEY = os.getenv("UP_API_KEY")
+API_KEY = os.getenv("UPS_API_KEY")
 ACCESS_TOKEN = os.getenv("UPS_ACCESS_TOKEN")
 
-strike_prices = [50000, 53000, 63000]
-option_types = ['CE', 'PE']
-EXPIRY = '12JUN25'  # Update to current expiry, e.g., '27JUN25'
-last_data = {}
 
-# Initialize Upstox SDK
 configuration = upstox_client.Configuration()
-configuration.access_token = ACCESS_TOKEN
 configuration.api_key['apiKey'] = API_KEY
-market_api = upstox_client.MarketQuoteApi(upstox_client.ApiClient(configuration))
+configuration.access_token = ACCESS_TOKEN
+api_client = upstox_client.ApiClient(configuration)
+option_api = upstox_client.OptionChainApi(api_client)
 
-def send_message(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {'chat_id': CHAT_ID, 'text': msg}
+index_keys = {
+    "NIFTY 50": "NSE_INDEX|Nifty 50",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+    "SENSEX": "BSE_INDEX|Sensex"
+}
+
+def get_latest_expiry(key):
     try:
-        requests.post(url, data=data)
-    except Exception as e:
-        print("Telegram Error:", e)
-
-def track_option_trends():
-    header = ["🕒 Option Trend Update: " + datetime.now().strftime('%H:%M:%S'), ""]
-    result_lines = header.copy()
-
-    # Build comma-separated instrument_key list
-    instrument_keys = []
-    for strike in strike_prices:
-        for typ in option_types:
-            key = f"NSE_FO|BANKNIFTY{EXPIRY}{strike}{typ}"
-            instrument_keys.append(key)
-    symbols = ",".join(instrument_keys)
-
-    try:
-        resp = market_api.get_full_market_quote(symbols, api_version='2.0')
-        quotes = resp.data  # dict of instrument_key → QuoteData
+        resp = option_api.get_option_expiry(key)
+        weekly = [d for d in resp.data if "T00:00:00+05:30" in d]
+        return weekly[0] if weekly else resp.data[0]
     except ApiException as e:
-        send_message(f"❌ API error fetching quotes:\n{e}")
-        return
+        print(f"Error: {e}")
+        return None
 
-    for inst_key, data in quotes.items():
+def fetch_chain(key, expiry):
+    all_data = []
+    offset = 0
+    limit = 50
+    while True:
         try:
-            parts = inst_key.split('|')[-1]  # e.g. BANKNIFTY27JUN2550000CE
-            # Extract strike and type
-            strike = ''.join(filter(str.isdigit, parts[len(EXPIRY):]))
-            opt_type = parts[-2:]  # 'CE' or 'PE'
-            ltp = data.last_price
-            oi = data.oi
+            res = option_api.get_option_chain(key, expiry, offset=offset, limit=limit)
+            data = res.data or []
+            all_data += data
+            if len(data) < limit:
+                break
+            offset += limit
+        except ApiException as e:
+            print(f"Chain fetch error: {e}")
+            break
+    return all_data
 
-            k_price = f"{strike}_{opt_type}_PRICE"
-            k_oi = f"{strike}_{opt_type}_OI"
+result = {}
+for name, key in index_keys.items():
+    expiry = get_latest_expiry(key)
+    if expiry:
+        data = fetch_chain(key, expiry)
+        result[name] = {"expiry": expiry, "data": data}
 
-            prev_price = last_data.get(k_price, ltp)
-            trend_price = "up" if ltp > prev_price else "down" if ltp < prev_price else "same"
-            last_data[k_price] = ltp
+filename = f"nifty_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+with open(filename, "w") as f:
+    json.dump(result, f, indent=2)
 
-            prev_oi = last_data.get(k_oi, oi)
-            trend_oi = "up" if oi > prev_oi else "down" if oi < prev_oi else "same"
-            last_data[k_oi] = oi
-
-            result_lines.append(f"{strike} | {opt_type} | ₹{ltp} ({trend_price}) | OI: {oi} ({trend_oi})")
-        except Exception as e:
-            result_lines.append(f"Error parsing {inst_key}: {e}")
-
-    send_message("\n".join(result_lines))
-
-# Run once (schedule this every 15 min)
-if __name__ == "__main__":
-    track_option_trends()
+print(f"✅ Saved to {filename}")
